@@ -3,4 +3,4 @@ name: perth
 description: perth service (Go)
 type: application
 version: 0.1.0
-appVersion: "main-b0"
+appVersion: "main-b2"
