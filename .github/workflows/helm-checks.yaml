@@ -1,0 +1,71 @@
+# Checks on Hanoi itself: chart quality, K8s schema, misconfiguration, and a guard
+# that stops anyone editing CI-owned image tags in a pull request.
+name: Helm checks
+
+on:
+  pull_request:
+    branches: [develop, "release/**"]
+  push:
+    branches: [develop, "release/**", "feature/**"]
+    paths: ["helm-charts/**"]
+
+permissions: {}
+
+env:
+  TRIVY_VERSION: "v0.76.1"
+
+jobs:
+  validate:
+    name: Validate charts
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@v5
+
+      - name: helm lint + render
+        run: |
+          set -euo pipefail
+          mkdir -p rendered
+          for dir in helm-charts/*/; do
+            name=$(basename "$dir")
+            helm lint --strict "$dir"
+            helm template "$name" "$dir" > "rendered/$name.yaml"
+          done
+
+      - name: kubeconform (K8s schema)
+        run: docker run --rm -v "$PWD/rendered:/r:ro" ghcr.io/yannh/kubeconform:v0.8.0 -strict -summary /r
+
+      - uses: aquasecurity/setup-trivy@v0.3.1
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          cache: true
+
+      - name: Trivy config (K8s misconfiguration in charts)
+        run: trivy config --severity HIGH,CRITICAL --exit-code 1 helm-charts/
+
+  manual-tag-guard:
+    name: No manual image tag edits
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Fail if a PR changes imageTag / imageName / appVersion
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          changed=$(git diff "origin/${BASE_REF}...HEAD" -- 'helm-charts/*/values.yaml' 'helm-charts/*/Chart.yaml' \
+            | grep -E '^[+-][[:space:]]*(imageTag|imageName|appVersion):' || true)
+          if [[ -n "$changed" ]]; then
+            echo "$changed"
+            echo "::error::Image tags in Hanoi are owned by CI. Rebuild the service instead of editing tags."
+            exit 1
+          fi

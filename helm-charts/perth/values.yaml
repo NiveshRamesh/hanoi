@@ -1,0 +1,22 @@
+# imageName / imageTag are written by CI (ci-templates build-deploy.yml).
+# Never edit them by hand - the next build overwrites them and PRs that touch them are blocked.
+vunet:
+  registry: ghcr.io
+  imageName: &imageName "niveshramesh/perth"
+  imageTag: &imageTag "main-b0"
+
+replicaCount: 1
+containerPort: 8080
+runAsUser: 65532   # distroless nonroot
+healthPath: /health
+
+service:
+  type: ClusterIP
+  port: 80
+
+resources:
+  requests: { cpu: 50m, memory: 64Mi }
+  limits:   { cpu: 500m, memory: 256Mi }
+
+podLabels:
+  app.kubernetes.io/version: *imageTag

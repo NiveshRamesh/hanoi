@@ -1,0 +1,30 @@
+# Smoke cluster/namespace tracks Hanoi `develop`: one Argo CD Application per chart.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: smoke
+  namespace: argocd
+spec:
+  goTemplate: true
+  generators:
+    - git:
+        repoURL: https://github.com/NiveshRamesh/hanoi.git
+        revision: develop
+        directories:
+          - path: helm-charts/*
+  template:
+    metadata:
+      name: "smoke-{{.path.basename}}"
+    spec:
+      project: default
+      source:
+        repoURL: https://github.com/NiveshRamesh/hanoi.git
+        targetRevision: develop
+        path: "{{.path.path}}"
+        helm:
+          releaseName: "{{.path.basename}}"
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: smoke
+      syncPolicy:
+        automated: { prune: true, selfHeal: true }

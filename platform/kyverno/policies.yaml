@@ -1,0 +1,74 @@
+# Admission control: the last line of defence. Even if someone bypasses CI and edits a
+# tag, the cluster refuses to run an image that the central pipeline did not build and sign.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: verify-image-signatures
+  annotations:
+    policies.kyverno.io/description: >-
+      Only images signed (cosign keyless) by ci-templates/build-deploy.yml may run.
+spec:
+  webhookTimeoutSeconds: 30
+  background: false
+  rules:
+    - name: signed-by-central-pipeline
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaceSelector:
+                matchExpressions:
+                  - { key: env, operator: In, values: [dev, smoke, qa] }
+      verifyImages:
+        - imageReferences: ["ghcr.io/niveshramesh/*"]
+          failureAction: Enforce
+          mutateDigest: true      # pin the running pod to the verified digest
+          verifyDigest: true
+          required: true
+          attestors:
+            - entries:
+                - keyless:
+                    issuer: https://token.actions.githubusercontent.com
+                    subject: "https://github.com/NiveshRamesh/ci-templates/.github/workflows/build-deploy.yml@*"
+                    rekor:
+                      url: https://rekor.sigstore.dev
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: allowed-registries-and-tags
+spec:
+  background: true
+  rules:
+    - name: only-our-registry
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaceSelector:
+                matchExpressions:
+                  - { key: env, operator: In, values: [dev, smoke, qa] }
+      validate:
+        failureAction: Enforce
+        message: "Images must come from ghcr.io/niveshramesh/."
+        pattern:
+          spec:
+            =(initContainers):
+              - image: "ghcr.io/niveshramesh/*"
+            containers:
+              - image: "ghcr.io/niveshramesh/*"
+    - name: no-latest-tag
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaceSelector:
+                matchExpressions:
+                  - { key: env, operator: In, values: [dev, smoke, qa] }
+      validate:
+        failureAction: Enforce
+        message: "Mutable ':latest' tags are not allowed - deploy an immutable build tag."
+        pattern:
+          spec:
+            containers:
+              - image: "!*:latest"

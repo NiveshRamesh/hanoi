@@ -1,0 +1,65 @@
+# "Propagate release branches": creates release/<x.y> in Hanoi first, then in every
+# repo listed in .github/release-repos.txt. Branch creation by the GitHub App is a push,
+# so each service's Build & Deploy runs and writes NG-<x.y.0>-b<n> into Hanoi release/<x.y>.
+name: Propagate release branches
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_branch:
+        description: "Release branch to create, e.g. release/3.3"
+        required: true
+      base:
+        description: "Branch to cut from"
+        default: develop
+
+permissions: {}
+
+jobs:
+  propagate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Validate input
+        env:
+          BR: ${{ inputs.release_branch }}
+          BASE: ${{ inputs.base }}
+        run: |
+          [[ "$BR" =~ ^release/[0-9]+\.[0-9]+$ ]] || { echo "::error::Expected release/<major>.<minor>, got '$BR'"; exit 1; }
+          [[ "$BASE" =~ ^[A-Za-z0-9._/-]+$ ]] || { echo "::error::Invalid base '$BASE'"; exit 1; }
+
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: GitHub App token (all release repos)
+        id: app
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.CICD_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CICD_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-contents: write
+
+      - name: Create branches
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          OWNER: ${{ github.repository_owner }}
+          HANOI: ${{ github.event.repository.name }}
+          BR: ${{ inputs.release_branch }}
+          BASE: ${{ inputs.base }}
+        run: |
+          set -euo pipefail
+          create() {
+            local repo=$1 sha
+            if gh api "repos/$OWNER/$repo/git/ref/heads/$BR" >/dev/null 2>&1; then
+              echo "= $repo: $BR already exists"; return 0
+            fi
+            sha=$(gh api "repos/$OWNER/$repo/git/ref/heads/$BASE" --jq .object.sha)
+            gh api -X POST "repos/$OWNER/$repo/git/refs" -f ref="refs/heads/$BR" -f sha="$sha" >/dev/null
+            echo "+ $repo: created $BR from $BASE@${sha:0:7}" | tee -a "$GITHUB_STEP_SUMMARY"
+          }
+          # Hanoi first - service builds on the new branch must find it.
+          create "$HANOI"
+          grep -vE '^\s*(#|$)' .github/release-repos.txt | while read -r repo; do create "$repo"; done

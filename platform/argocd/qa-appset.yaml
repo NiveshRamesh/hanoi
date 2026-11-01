@@ -1,0 +1,32 @@
+# Functional QA tracks the current Hanoi release branch.
+# When a new release is cut, change both `revision` and `targetRevision` (or run
+#   kubectl -n argocd patch applicationset qa --type json -p '[...]').
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: qa
+  namespace: argocd
+spec:
+  goTemplate: true
+  generators:
+    - git:
+        repoURL: https://github.com/NiveshRamesh/hanoi.git
+        revision: release/3.3
+        directories:
+          - path: helm-charts/*
+  template:
+    metadata:
+      name: "qa-{{.path.basename}}"
+    spec:
+      project: default
+      source:
+        repoURL: https://github.com/NiveshRamesh/hanoi.git
+        targetRevision: release/3.3
+        path: "{{.path.path}}"
+        helm:
+          releaseName: "{{.path.basename}}"
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: qa
+      syncPolicy:
+        automated: { prune: true, selfHeal: true }

@@ -1,0 +1,145 @@
+# "Run bundle (manual)": the release gate, run after QA sign-off.
+#   precheck: last build of every release repo is green; every chart points at an
+#             NG- image of this release; that image is signed by the central pipeline;
+#             a fresh CVE scan (today's DB) finds no fixable CRITICAL.
+#   bundle:   package charts + image list pinned by digest, publish a GitHub release.
+name: Run bundle (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_branch:
+        description: "e.g. release/3.3"
+        required: true
+      version:
+        description: "Bundle version (default <x.y>.0)"
+        default: ""
+
+permissions: {}
+
+env:
+  TRIVY_VERSION: "v0.76.1"
+  TRIVY_DB_REPOSITORY: "public.ecr.aws/aquasecurity/trivy-db:2,ghcr.io/aquasecurity/trivy-db:2"
+
+jobs:
+  precheck:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - name: Resolve version
+        id: v
+        env:
+          BR: ${{ inputs.release_branch }}
+          VER: ${{ inputs.version }}
+        run: |
+          [[ "$BR" =~ ^release/([0-9]+\.[0-9]+)$ ]] || { echo "::error::Bad branch '$BR'"; exit 1; }
+          XY="${BASH_REMATCH[1]}"
+          VER="${VER:-$XY.0}"
+          [[ "$VER" =~ ^${XY//./\\.}\.[0-9]+$ ]] || { echo "::error::Version '$VER' does not match $BR"; exit 1; }
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.release_branch }}
+          persist-credentials: false
+
+      - name: GitHub App token (read Actions runs)
+        id: app
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.CICD_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CICD_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-actions: read
+
+      - name: Last build of every release repo is green
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          OWNER: ${{ github.repository_owner }}
+          BR: ${{ inputs.release_branch }}
+        run: |
+          set -euo pipefail
+          fail=0
+          for repo in $(grep -vE '^\s*(#|$)' .github/release-repos.txt); do
+            c=$(gh run list -R "$OWNER/$repo" --branch "$BR" --workflow ci.yml --event push --limit 1 --json conclusion --jq '.[0].conclusion // "none"')
+            echo "$repo: $c"
+            [[ "$c" == success ]] || fail=1
+          done
+          [[ $fail == 0 ]] || { echo "::error::Not every release repo has a green last build on $BR"; exit 1; }
+
+      - uses: sigstore/cosign-installer@v4
+      - uses: aquasecurity/setup-trivy@v0.3.1
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+
+      - name: Images are release builds, signed by the central pipeline, and CVE-clean
+        env:
+          OWNER: ${{ github.repository_owner }}
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          fail=0
+          for values in helm-charts/*/values.yaml; do
+            chart=$(basename "$(dirname "$values")")
+            ref="$(yq '.vunet.registry' "$values")/$(yq '.vunet.imageName' "$values"):$(yq '.vunet.imageTag' "$values")"
+            echo "::group::$chart -> $ref"
+            tag="${ref##*:}"
+            if [[ "$tag" != NG-${VERSION}-b* ]]; then
+              echo "::error::$chart is on '$tag', expected NG-${VERSION}-b<n>. Its release build has not run or failed."
+              fail=1
+            fi
+            cosign verify "$ref" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              --certificate-identity-regexp "^https://github.com/${OWNER}/ci-templates/.github/workflows/build-deploy.yml@" \
+              > /dev/null || { echo "::error::$chart image signature invalid"; fail=1; }
+            trivy image --severity CRITICAL --ignore-unfixed --exit-code 1 --quiet "$ref" \
+              || { echo "::error::$chart has fixable CRITICAL CVEs"; fail=1; }
+            echo "::endgroup::"
+          done
+          [[ $fail == 0 ]]
+
+  bundle:
+    needs: precheck
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create the GitHub release + tag
+    env:
+      VERSION: ${{ needs.precheck.outputs.version }}
+      BR: ${{ inputs.release_branch }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.release_branch }}
+          persist-credentials: false
+
+      - uses: azure/setup-helm@v5
+
+      - name: Package charts and pin images by digest
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          echo "# NG-${VERSION} image list (pinned by digest)" > dist/images.txt
+          for dir in helm-charts/*/; do
+            helm package "$dir" --app-version "NG-${VERSION}" -d dist
+            v="${dir}values.yaml"
+            ref="$(yq '.vunet.registry' "$v")/$(yq '.vunet.imageName' "$v"):$(yq '.vunet.imageTag' "$v")"
+            digest=$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}' | jq -r .digest)
+            echo "${ref}@${digest}" >> dist/images.txt
+          done
+          cat dist/images.txt
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-bundle-NG-${{ env.VERSION }}
+          path: dist/
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "NG-${VERSION}" dist/* --repo "$GITHUB_REPOSITORY" --target "$BR" \
+            --title "NG ${VERSION}" \
+            --notes "Release bundle for ${BR}. Images are signed (cosign keyless) and carry CycloneDX SBOM attestations."

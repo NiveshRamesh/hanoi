@@ -1,0 +1,67 @@
+# New CVEs are published every day. An image that was clean at build time can become
+# vulnerable while it runs in Smoke / QA / production, so re-scan what Hanoi says is deployed.
+name: Nightly image re-scan
+
+on:
+  schedule:
+    - cron: "30 1 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+env:
+  TRIVY_VERSION: "v0.76.1"
+  TRIVY_DB_REPOSITORY: "public.ecr.aws/aquasecurity/trivy-db:2,ghcr.io/aquasecurity/trivy-db:2"
+
+jobs:
+  rescan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: aquasecurity/setup-trivy@v0.3.1
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+
+      - name: Scan images on develop and every release branch
+        id: scan
+        run: |
+          set -uo pipefail
+          : > report.md
+          found=0
+          branches="develop $(git branch -r --format='%(refname:short)' | sed -n 's#^origin/\(release/.*\)#\1#p')"
+          for br in $branches; do
+            for chart in $(git ls-tree --name-only "origin/$br" helm-charts/ | xargs -n1 basename); do
+              v=$(git show "origin/$br:helm-charts/$chart/values.yaml") || continue
+              ref="$(yq '.vunet.registry' <<<"$v")/$(yq '.vunet.imageName' <<<"$v"):$(yq '.vunet.imageTag' <<<"$v")"
+              trivy image --quiet --severity CRITICAL,HIGH --ignore-unfixed --format json --output scan.json "$ref"
+              n=$(jq '[.Results[]?.Vulnerabilities[]?] | length' scan.json)
+              echo "$br / $chart ($ref): $n fixable HIGH/CRITICAL"
+              if [[ "$n" -gt 0 ]]; then
+                found=1
+                {
+                  echo "### $chart on \`$br\` - $n finding(s)"
+                  echo "\`$ref\`"
+                  echo
+                  jq -r '.Results[]?.Vulnerabilities[]? | "- \(.Severity) \(.VulnerabilityID) \(.PkgName) \(.InstalledVersion) -> \(.FixedVersion)"' scan.json
+                  echo
+                } >> report.md
+              fi
+            done
+          done
+          echo "found=$found" >> "$GITHUB_OUTPUT"
+
+      - name: Open / update security issue
+        if: steps.scan.outputs.found == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="Nightly re-scan: fixable HIGH/CRITICAL CVEs in deployed images"
+          num=$(gh issue list --state open --search "in:title \"$title\"" --json number --jq '.[0].number // empty')
+          if [[ -n "$num" ]]; then gh issue comment "$num" --body-file report.md
+          else gh issue create --title "$title" --body-file report.md; fi

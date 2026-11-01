@@ -1,0 +1,4 @@
+# Service repositories that get a release/<x.y> branch when a release is cut.
+# One repo name per line (owner = the Hanoi repo owner).
+cairo
+perth
