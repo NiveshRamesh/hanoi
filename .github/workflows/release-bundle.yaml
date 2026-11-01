@@ -70,7 +70,7 @@ jobs:
           done
           [[ $fail == 0 ]] || { echo "::error::Not every release repo has a green last build on $BR"; exit 1; }
 
-      - uses: sigstore/cosign-installer@v4
+      - uses: sigstore/cosign-installer@v4.1.2
       - uses: aquasecurity/setup-trivy@v0.3.1
         with:
           version: ${{ env.TRIVY_VERSION }}
