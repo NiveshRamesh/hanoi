@@ -3,4 +3,4 @@ name: perth
 description: perth service (Go)
 type: application
 version: 0.1.0
-appVersion: "feat-DSO-1-b6"
+appVersion: "feat-DSO-1-b8"
