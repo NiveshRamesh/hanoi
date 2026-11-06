@@ -65,11 +65,11 @@ jobs:
         run: |
           set -euo pipefail
           fail=0
-          for repo in $(grep -vE '^\s*(#|$)' .github/release-repos.txt); do
+          while read -r repo; do
             c=$(gh run list -R "$OWNER/$repo" --branch "$BR" --workflow ci.yml --event push --limit 1 --json conclusion --jq '.[0].conclusion // "none"')
             echo "$repo: $c"
             [[ "$c" == success ]] || fail=1
-          done
+          done < <(grep -vE '^\s*(#|$)' .github/release-repos.txt)
           [[ $fail == 0 ]] || { echo "::error::Not every release repo has a green last build on $BR"; exit 1; }
 
       # Tickets come from the nightly scan. The checker runs from the workflow's own commit,
