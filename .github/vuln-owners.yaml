@@ -1,0 +1,15 @@
+# Who fixes vulnerabilities in each service, and how fast. Read by the nightly scan.
+# github: assignee for GitHub Issues. jira_account_id: assignee when tickets go to Jira
+# (Jira -> profile URL ends in the account id). SLA days count from the night a fix was first seen.
+sla_days:
+  CRITICAL: 7
+  HIGH: 30
+default:
+  github: NiveshRamesh
+services:
+  cairo:
+    github: NiveshRamesh
+    jira_account_id: ""
+  perth:
+    github: NiveshRamesh
+    jira_account_id: ""

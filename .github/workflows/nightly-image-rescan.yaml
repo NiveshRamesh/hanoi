@@ -1,67 +1,136 @@
-# New CVEs are published every day. An image that was clean at build time can become
-# vulnerable while it runs in Smoke / QA / production, so re-scan what Hanoi says is deployed.
-name: Nightly image re-scan
+# Nightly vulnerability scan of everything Hanoi says is deployed (develop + release/*).
+# PRs and builds only block what a change introduces, so this is where existing and newly
+# disclosed vulnerabilities are found and tracked: one ticket per service and fix, with an
+# owner and an SLA due date (scripts/vuln_tickets.py, owners in .github/vuln-owners.yaml).
+# Tickets go to Jira when the JIRA_* secrets and the JIRA_PROJECT variable are set,
+# otherwise to GitHub Issues in this repo. Run bundle refuses releases with overdue tickets.
+name: Nightly vulnerability scan
 
 on:
   schedule:
     - cron: "30 1 * * *"
   workflow_dispatch:
+    inputs:
+      simulate_failure:
+        description: "Fail on purpose to test the failure alert"
+        type: boolean
+        default: false
 
 permissions: {}
 
+concurrency:
+  group: nightly-vulnerability-scan
+  cancel-in-progress: false
+
 env:
-  TRIVY_VERSION: "v0.76.1"
   TRIVY_DB_REPOSITORY: "public.ecr.aws/aquasecurity/trivy-db:2,ghcr.io/aquasecurity/trivy-db:2"
 
 jobs:
-  rescan:
+  scan:
+    name: Scan deployed images and sync tickets
     runs-on: ubuntu-latest
     permissions:
       contents: read
       issues: write
+    env:
+      GH_REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: aquasecurity/setup-trivy@v0.3.1
+
+      # Tool downloads occasionally fail on a network error; try once more before giving up.
+      - id: trivy1
+        uses: aquasecurity/setup-trivy@v0.3.1
+        continue-on-error: true
         with:
-          version: ${{ env.TRIVY_VERSION }}
+          version: "v0.76.1"
+      - if: steps.trivy1.outcome == 'failure'
+        uses: aquasecurity/setup-trivy@v0.3.1
+        with:
+          version: "v0.76.1"
+
+      - name: Self-test the ticket logic
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
 
       - name: Scan images on develop and every release branch
-        id: scan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+          SIMULATE_FAILURE: ${{ inputs.simulate_failure }}
         run: |
-          set -uo pipefail
-          : > report.md
-          found=0
+          set -euo pipefail
+          if [[ "$SIMULATE_FAILURE" == true ]]; then echo "::error::Simulated failure (testing the alert)."; exit 1; fi
+          mkdir -p scans
+          echo '[]' > scans/manifest.json
           branches="develop $(git branch -r --format='%(refname:short)' | sed -n 's#^origin/\(release/.*\)#\1#p')"
+          i=0
           for br in $branches; do
             for chart in $(git ls-tree --name-only "origin/$br" helm-charts/ | xargs -n1 basename); do
-              v=$(git show "origin/$br:helm-charts/$chart/values.yaml") || continue
-              ref="$(yq '.vunet.registry' <<<"$v")/$(yq '.vunet.imageName' <<<"$v"):$(yq '.vunet.imageTag' <<<"$v")"
-              trivy image --quiet --severity CRITICAL,HIGH --ignore-unfixed --format json --output scan.json "$ref"
-              n=$(jq '[.Results[]?.Vulnerabilities[]?] | length' scan.json)
-              echo "$br / $chart ($ref): $n fixable HIGH/CRITICAL"
-              if [[ "$n" -gt 0 ]]; then
-                found=1
-                {
-                  echo "### $chart on \`$br\` - $n finding(s)"
-                  echo "\`$ref\`"
-                  echo
-                  jq -r '.Results[]?.Vulnerabilities[]? | "- \(.Severity) \(.VulnerabilityID) \(.PkgName) \(.InstalledVersion) -> \(.FixedVersion)"' scan.json
-                  echo
-                } >> report.md
+              v=$(git show "origin/$br:helm-charts/$chart/values.yaml")
+              image_name=$(yq '.vunet.imageName' <<<"$v")
+              ref="$(yq '.vunet.registry' <<<"$v")/${image_name}:$(yq '.vunet.imageTag' <<<"$v")"
+              svc="${image_name##*/}"
+              i=$((i + 1))
+              # The service's accepted exceptions on the same branch; expired ones get flagged.
+              ignore=""
+              ignore_args=()
+              if gh api -H 'Accept: application/vnd.github.raw' "repos/$OWNER/$svc/contents/.trivyignore.yaml?ref=$br" \
+                   > "scans/ignore-$i.yaml" 2>/dev/null; then
+                yq -o=json '.vulnerabilities // []' "scans/ignore-$i.yaml" > "scans/ignore-$i.json"
+                ignore="ignore-$i.json"
+                ignore_args=(--ignorefile "scans/ignore-$i.yaml")
               fi
+              echo "::group::$br / $svc -> $ref"
+              ok=0
+              for attempt in 1 2 3; do
+                if trivy image --quiet --scanners vuln --severity CRITICAL,HIGH --ignore-unfixed "${ignore_args[@]}" \
+                     --format json --output "scans/scan-$i.json" "$ref"; then ok=1; break; fi
+                echo "Attempt $attempt failed; retrying in 30 s"; sleep 30
+              done
+              if [[ $ok != 1 ]]; then echo "::error::Could not scan $ref"; exit 1; fi
+              jq -r '[.Results[]?.Vulnerabilities[]?] | "\(length) fixable HIGH/CRITICAL finding(s)"' "scans/scan-$i.json"
+              echo "::endgroup::"
+              jq --arg b "$br" --arg s "$svc" --arg img "$ref" --arg scan "scan-$i.json" --arg ign "$ignore" \
+                '. + [{branch: $b, service: $s, image: $img, scan: $scan} + (if $ign == "" then {} else {ignore: $ign} end)]' \
+                scans/manifest.json > scans/manifest.tmp && mv scans/manifest.tmp scans/manifest.json
             done
           done
-          echo "found=$found" >> "$GITHUB_OUTPUT"
 
-      - name: Open / update security issue
-        if: steps.scan.outputs.found == '1'
+      - name: Sync tickets (Jira if configured, otherwise GitHub Issues)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          JIRA_URL: ${{ secrets.JIRA_URL }}
+          JIRA_USERNAME: ${{ secrets.JIRA_USERNAME }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_PROJECT: ${{ vars.JIRA_PROJECT }}
+          JIRA_ISSUE_TYPE: ${{ vars.JIRA_ISSUE_TYPE }}
+          JIRA_PRIORITIES: ${{ vars.JIRA_PRIORITIES }}
+        run: |
+          yq -o=json .github/vuln-owners.yaml > owners.json
+          python3 scripts/vuln_tickets.py sync --scan-dir scans --config owners.json
+
+      - name: Alert - the nightly scan failed
+        if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          title="Nightly re-scan: fixable HIGH/CRITICAL CVEs in deployed images"
-          num=$(gh issue list --state open --search "in:title \"$title\"" --json number --jq '.[0].number // empty')
-          if [[ -n "$num" ]]; then gh issue comment "$num" --body-file report.md
-          else gh issue create --title "$title" --body-file report.md; fi
+          gh label create scan-failure --color d93f0b --description "Nightly vulnerability scan did not complete" --force >/dev/null
+          num=$(gh issue list --state open --label scan-failure --json number --jq '.[0].number // empty')
+          if [[ -n "$num" ]]; then
+            gh issue comment "$num" --body "Failed again: $RUN_URL"
+          else
+            gh issue create --title "Nightly vulnerability scan failed" --label scan-failure \
+              --body "The nightly scan did not complete, so tonight's new vulnerabilities were not checked. Run: $RUN_URL"
+          fi
+
+      - name: Close the failure alert after a successful run
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for num in $(gh issue list --state open --label scan-failure --json number --jq '.[].number' 2>/dev/null || true); do
+            gh issue close "$num" --comment "The nightly scan succeeded again: $RUN_URL"
+          done
