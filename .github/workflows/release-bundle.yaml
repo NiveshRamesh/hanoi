@@ -1,7 +1,8 @@
 # "Run bundle (manual)": the release gate, run after QA sign-off.
 #   precheck: last build of every release repo is green; every chart points at an
 #             NG- image of this release; that image is signed by the central pipeline;
-#             a fresh CVE scan (today's DB) finds no fixable CRITICAL.
+#             a fresh CVE scan (today's DB) finds no fixable CRITICAL; no overdue
+#             vulnerability ticket (SLA missed or exception expired) affects this branch.
 #   bundle:   package charts + image list pinned by digest, publish a GitHub release.
 name: Run bundle (manual)
 
@@ -26,6 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      issues: read
     outputs:
       version: ${{ steps.v.outputs.version }}
     steps:
@@ -46,13 +48,18 @@ jobs:
           ref: ${{ inputs.release_branch }}
           persist-credentials: false
 
-      - name: GitHub App token (read Actions runs)
+      - name: Release repos
+        id: repos
+        run: echo "list=$(grep -vE '^\s*(#|$)' .github/release-repos.txt | paste -sd, -)" >> "$GITHUB_OUTPUT"
+
+      - name: GitHub App token (read Actions runs of the release repos only)
         id: app
         uses: actions/create-github-app-token@v3
         with:
           client-id: ${{ secrets.CICD_APP_CLIENT_ID }}
           private-key: ${{ secrets.CICD_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
+          repositories: ${{ steps.repos.outputs.list }}
           permission-actions: read
 
       - name: Last build of every release repo is green
@@ -63,12 +70,31 @@ jobs:
         run: |
           set -euo pipefail
           fail=0
-          for repo in $(grep -vE '^\s*(#|$)' .github/release-repos.txt); do
+          while read -r repo; do
             c=$(gh run list -R "$OWNER/$repo" --branch "$BR" --workflow ci.yml --event push --limit 1 --json conclusion --jq '.[0].conclusion // "none"')
             echo "$repo: $c"
             [[ "$c" == success ]] || fail=1
-          done
+          done < <(grep -vE '^\s*(#|$)' .github/release-repos.txt)
           [[ $fail == 0 ]] || { echo "::error::Not every release repo has a green last build on $BR"; exit 1; }
+
+      # Tickets come from the nightly scan. The checker runs from the workflow's own commit,
+      # not from the release branch, so the gate cannot be weakened on a release branch.
+      - name: Check out the release tooling
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          path: .tools
+          persist-credentials: false
+
+      - name: No overdue vulnerability tickets for this release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          BR: ${{ inputs.release_branch }}
+          JIRA_URL: ${{ secrets.JIRA_URL }}
+          JIRA_USERNAME: ${{ secrets.JIRA_USERNAME }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_PROJECT: ${{ vars.JIRA_PROJECT }}
+        run: python3 .tools/scripts/vuln_tickets.py check --branch "$BR"
 
       - uses: sigstore/cosign-installer@v4.1.2
       - uses: aquasecurity/setup-trivy@v0.3.1

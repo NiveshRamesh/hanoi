@@ -33,14 +33,23 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: GitHub App token (all release repos)
+      - name: Repos that get the release branch
+        id: repos
+        env:
+          HANOI: ${{ github.event.repository.name }}
+        run: echo "list=$( { echo "$HANOI"; grep -vE '^\s*(#|$)' .github/release-repos.txt; } | paste -sd, -)" >> "$GITHUB_OUTPUT"
+
+      - name: GitHub App token (Hanoi + release repos only)
         id: app
         uses: actions/create-github-app-token@v3
         with:
           client-id: ${{ secrets.CICD_APP_CLIENT_ID }}
           private-key: ${{ secrets.CICD_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
+          repositories: ${{ steps.repos.outputs.list }}
           permission-contents: write
+          # New branches in repos that contain .github/workflows need the workflows permission
+          permission-workflows: write
 
       - name: Create branches
         env:

@@ -1,0 +1,8 @@
+# Tag pins (@v7) are accepted for now so the templates stay readable.
+# Hardening step: run `pinact run` (github.com/suzuki-shunsuke/pinact) to rewrite every
+# `uses:` to a full commit SHA, then change "*" below to hash-pin. Dependabot keeps SHAs fresh.
+rules:
+  unpinned-uses:
+    config:
+      policies:
+        "*": ref-pin
