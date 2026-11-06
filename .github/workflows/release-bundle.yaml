@@ -48,13 +48,18 @@ jobs:
           ref: ${{ inputs.release_branch }}
           persist-credentials: false
 
-      - name: GitHub App token (read Actions runs)
+      - name: Release repos
+        id: repos
+        run: echo "list=$(grep -vE '^\s*(#|$)' .github/release-repos.txt | paste -sd, -)" >> "$GITHUB_OUTPUT"
+
+      - name: GitHub App token (read Actions runs of the release repos only)
         id: app
         uses: actions/create-github-app-token@v3
         with:
           client-id: ${{ secrets.CICD_APP_CLIENT_ID }}
           private-key: ${{ secrets.CICD_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
+          repositories: ${{ steps.repos.outputs.list }}
           permission-actions: read
 
       - name: Last build of every release repo is green
