@@ -152,6 +152,17 @@ class Tests(unittest.TestCase):
         self.assertEqual(vt._parse_state("text" + vt._state_block(st)), st)
         self.assertIsNone(vt._parse_state("an issue without state"))
 
+    def test_jira_wiki_markup(self):
+        md = "\n".join(["**Service:** cairo  ", "**Images:** `ghcr.io/x/cairo:main-b30`", "",
+                        "| Severity | CVE | Installed |", "| --- | --- | --- |",
+                        "| HIGH | [CVE-1](https://avd.aquasec.com/nvd/cve-1) | 1.3.1-1+b1 |", "",
+                        "_Maintained by the nightly scan._"])
+        self.assertEqual(vt.to_jira_wiki(md).split("\n"), [
+            "*Service:* cairo", "*Images:* {{ghcr.io/x/cairo:main\\-b30}}", "",
+            "||Severity||CVE||Installed||",
+            "|HIGH|[CVE\\-1|https://avd.aquasec.com/nvd/cve-1]|1.3.1\\-1\\+b1|", "",
+            "_Maintained by the nightly scan._"])
+
 
 if __name__ == "__main__":
     unittest.main()
