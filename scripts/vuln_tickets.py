@@ -16,6 +16,7 @@ import argparse
 import datetime as dt
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -196,8 +197,48 @@ class GitHubIssues:
         self.comment(t, text)
 
 
+def _wiki_text(s):
+    """Escape characters Jira wiki markup would read as formatting (e.g. +x+ underline in 1.3-1+deb13u1)."""
+    return re.sub(r"([-+*_^~?{}\[\]|!#])", r"\\\1", s)
+
+
+def _wiki_inline(s):
+    """**bold**, `code` and [text](url) to Jira wiki; everything else escaped."""
+    out, pos = [], 0
+    for m in re.finditer(r"\*\*(.+?)\*\*|`(.+?)`|\[([^\]]+)\]\((https?://[^)\s]+)\)", s):
+        out.append(_wiki_text(s[pos:m.start()]))
+        if m.group(1) is not None:
+            out.append(f"*{_wiki_inline(m.group(1))}*")
+        elif m.group(2) is not None:
+            out.append("{{" + _wiki_text(m.group(2)) + "}}")
+        else:
+            out.append(f"[{_wiki_text(m.group(3))}|{m.group(4)}]")
+        pos = m.end()
+    return "".join(out) + _wiki_text(s[pos:])
+
+
+def to_jira_wiki(md):
+    """The ticket body (written as GitHub Markdown) in Jira wiki markup, for the v2 REST API."""
+    lines, header = [], True
+    for line in md.split("\n"):
+        if re.fullmatch(r"\|( *-+ *\|)+", line):
+            continue
+        if line.startswith("|") and line.endswith("|"):
+            cells = [_wiki_inline(c.strip()) for c in line[1:-1].split("|")]
+            sep = "||" if header else "|"
+            lines.append(sep + sep.join(cells) + sep)
+            header = False
+            continue
+        header = True
+        if len(line) > 2 and line.startswith("_") and line.endswith("_"):
+            lines.append("_" + _wiki_inline(line[1:-1]) + "_")
+        else:
+            lines.append(_wiki_inline(line.rstrip()))
+    return "\n".join(lines)
+
+
 class Jira:
-    """Jira Cloud REST. Untested against a live site until the org Jira is connected."""
+    """Jira Cloud REST (v2 API: wiki-markup descriptions and comments)."""
     name = "Jira"
 
     def __init__(self, url, user, token, project, issue_type, priorities):
@@ -231,7 +272,7 @@ class Jira:
                 return out
 
     def _fields(self, r):
-        f = {"summary": r["title"], "description": r["body"], "labels": [lb.replace(":", "-") for lb in r["labels"]],
+        f = {"summary": r["title"], "description": to_jira_wiki(r["body"]), "labels": [lb.replace(":", "-") for lb in r["labels"]],
              "duedate": r["due"]}
         if self.priorities.get(r["severity"]):
             f["priority"] = {"name": self.priorities[r["severity"]]}
@@ -257,7 +298,7 @@ class Jira:
                 or t["labels"] != sorted(lb.replace(":", "-") for lb in r["labels"]))
 
     def comment(self, t, text):
-        _http("POST", f"{self.base}/rest/api/2/issue/{t['id']}/comment", self.h, {"body": text})
+        _http("POST", f"{self.base}/rest/api/2/issue/{t['id']}/comment", self.h, {"body": _wiki_inline(text)})
 
     def _transition(self, t, category):
         trs = _http("GET", f"{self.base}/rest/api/2/issue/{t['id']}/transitions", self.h)["transitions"]
