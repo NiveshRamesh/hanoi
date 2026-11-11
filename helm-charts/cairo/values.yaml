@@ -3,7 +3,7 @@
 vunet:
   registry: ghcr.io
   imageName: &imageName "niveshramesh/cairo"
-  imageTag: &imageTag "main-b30"
+  imageTag: &imageTag "feat-DSO-8-b31"
 
 replicaCount: 1
 containerPort: 8080
