@@ -3,4 +3,4 @@ name: cairo
 description: cairo service (Python / FastAPI)
 type: application
 version: 0.1.0
-appVersion: "feat-DSO-107-b59"
+appVersion: "feat-DSO-107-b63"
