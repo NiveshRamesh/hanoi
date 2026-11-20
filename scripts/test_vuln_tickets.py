@@ -105,6 +105,14 @@ class Tests(unittest.TestCase):
         self.assertIn("overdue", r["labels"])
         self.assertEqual(r["owner"]["github"], "owner-default")
 
+    def test_exception_counts_as_expired_on_its_expiry_date(self):
+        ign = {"cairo": [{"id": "CVE-9", "expired_at": "2026-11-20"}]}
+        g = vt.load_groups(scan_dir([("develop", "cairo", [], [vuln("CVE-9", "urllib3", "HIGH")])], ign), "2026-11-20")
+        r = vt.render(g["cairo:pkg:urllib3"], {"CVE-9|urllib3": "2026-11-19"}, "2026-11-20", CFG)
+        self.assertEqual(r["due"], "2026-11-20")
+        self.assertIn("exception-expired", r["labels"])
+        self.assertNotIn("overdue", r["labels"])                 # overdue from tomorrow
+
     def test_sync_creates_then_is_idempotent(self):
         b = Fake()
         d = scan_dir([("develop", "cairo", [vuln("CVE-1", "apt", "HIGH")], [vuln("CVE-3", "urllib3", "HIGH")])])
