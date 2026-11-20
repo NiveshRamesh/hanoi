@@ -39,8 +39,9 @@ def load_groups(scan_dir, today):
         ignores = []
         if entry.get("ignore") and (scan_dir / entry["ignore"]).exists():
             ignores = json.loads((scan_dir / entry["ignore"]).read_text()) or []
+        # Trivy treats expired_at as midnight UTC, so an exception is already gone on that date.
         expired = {e["id"]: str(e["expired_at"])[:10] for e in ignores
-                   if e.get("id") and e.get("expired_at") and str(e["expired_at"])[:10] < today}
+                   if e.get("id") and e.get("expired_at") and str(e["expired_at"])[:10] <= today}
         svc, branch = entry["service"], entry["branch"]
         for res in data.get("Results") or []:
             os_pkgs = res.get("Class") == "os-pkgs"
